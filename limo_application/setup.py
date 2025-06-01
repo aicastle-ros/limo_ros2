@@ -20,7 +20,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'collect_data = limo_application.collect_data:main',
+            'collect_data = limo_application.collect:main',
+            'predict = limo_application.predict:main',
         ],
     },
 )

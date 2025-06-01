@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import os
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
@@ -9,52 +10,31 @@ from cv_bridge import CvBridge
 import numpy as np
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 import threading
-import os
-import time
 from datetime import datetime
 import sys
 import termios
 import tty
 import select
+import time
+import numpy as np
 
-keymap = {
-    '0': {
-        'message': 'Stop',
-        'linear_x': 0.0,
-        'angular_z': 0.0
-    },
-    '1': {
-        'message': 'Forward',
-        'linear_x': 0.5,
-        'angular_z': 0.0
-    },
-    '2': {
-        'message': 'Backward',
-        'linear_x': -0.5,
-        'angular_z': 0.0
-    },
-    '3': {
-        'message': 'Left',
-        'linear_x': 0.5,
-        'angular_z': 0.5
-    },
-    '4': {
-        'message': 'Right',
-        'linear_x': 0.5,
-        'angular_z': -0.5
-    }
-}
+from limo_application.constants import (
+    keymap, 
+    collect_dir,
+    collect_save_interval,
+    crop_top_ratio,
+    predict_model_path,
+    action_smooth,
+    prediction_interval,
+    forward_object_distance_threshold
+)
 
-class DataCollector(Node):
-    def __init__(self):
-        super().__init__('data_collector')        
-        
+class Classifier(Node):
+    def __init__(self, mode='collect'):
+        super().__init__('classifier_node')    
+        self.mode = mode
         # CV Bridge for image conversion
         self.bridge = CvBridge()
-        
-        # Output directory setup
-        self.output_dir = os.path.expanduser('~/output')
-        self.setup_output_directories()
         
         qos_profile = QoSProfile(
             depth=10,
@@ -89,6 +69,8 @@ class DataCollector(Node):
         # latest data
         self.latest_scan = None
         self.latest_image = None
+        self.last_save_time = 0
+        self.save_interval = collect_save_interval  # Save interval in seconds
         
         # Control variables
         self.running = True
@@ -97,14 +79,130 @@ class DataCollector(Node):
         self.old_settings = None
         self.setup_terminal()
         
+        
+        # Check if keymap is empty
+        if 'h' in keymap:
+            self.get_logger().info("'h' key is reserved for help, It will be ignored in keymap.")
+            del keymap['h']
+        if 's' in keymap:
+            self.get_logger().info("'s' key is reserved for status, It will be ignored in keymap.")
+            del keymap['s']
+        if 'q' in keymap:
+            self.get_logger().info("'q' key is reserved for quit, It will be ignored in keymap.")
+            del keymap['q']
+
         # Keyboard input thread
         self.keyboard_thread = threading.Thread(target=self.keyboard_listener, daemon=True)
         self.keyboard_thread.start()
+
+        # self.get_logger().info('Data Collector initialized.')
+        # self.get_logger().info('Press a number key to control robot (NO ENTER needed).')
+        # self.get_logger().info('Press "q" to quit, "h" for help, "s" for status.')
+
+        # mode setup
+        self.output_dir = collect_dir
+        if self.mode == 'collect':
+            self.setup_output_directories()
+        elif self.mode == 'predict':
+            if not os.path.exists(predict_model_path):
+                raise FileNotFoundError(f'Predict model path does not exist: {predict_model_path}')
+            # load model
+            from ultralytics import YOLO
+            self.model = YOLO(predict_model_path)
+            # warmup model
+            self.get_logger().info('Warming up model...')
+            [self.model(np.zeros((128, 128, 3), dtype=np.uint8)) for _ in range(3)] 
+        else:
+            raise ValueError(f'Invalid mode: {mode}. Use "collect" or "predict".')
+
+        # Timer for periodic prediction
+        if self.mode == 'predict':
+            self.predict_timer = self.create_timer(prediction_interval, self.predict_action)
+
+
+    def predict_action(self):
+        if self.get_forward_object_distance():
+            self.get_logger().info('Forward object detected, stopping prediction.')
+            return
+
+        self.predict(publish_cmd_vel=True)
+
+    def get_forward_object_distance(self):
+        if self.latest_scan :
+            latest_scan_len = len(self.latest_scan)
+            last_scan_section_len = latest_scan_len // 3
+            right_list = self.latest_scan[:last_scan_section_len]
+            right_mean = np.mean(right_list) if right_list else 0.0
+            forward_list = self.latest_scan[last_scan_section_len:2*last_scan_section_len]
+            forward_mean = np.mean(forward_list) if forward_list else 0.0
+            left_list = self.latest_scan[2*last_scan_section_len:]
+            left_mean = np.mean(left_list) if left_list else 0.0
+            if forward_mean < forward_object_distance_threshold:
+                self.get_logger().info(f'Forward object detected: {forward_mean:.2f} m')
+                return True
+        return False
+
+    def predict(self, publish_cmd_vel=False):
+        """Run prediction on the latest image"""
+        if self.latest_image is None:
+            self.get_logger().warn('No image available for prediction')
+            return
         
-        self.get_logger().info('Data Collector initialized.')
-        self.get_logger().info('Controls: 0=Stop, 1=Forward, 2=Backward, 3=Left, 4=Right')
-        self.get_logger().info('Press a number key to control robot (NO ENTER needed).')
-        self.get_logger().info('Press "q" to quit, "h" for help, "s" for status.')
+        try:
+            results = self.model(
+                source=self.img_preprocess(self.latest_image),  # Preprocess image
+                # verbose=False,  # 자세한 출력 제거
+                # augment=False,  # 분류 모델에서 불필요한 출력 제거
+                # imgsz=160
+            )
+            result = results[0]
+            ### 공통 데이터 정보 (result)
+            result_orig_img = result.orig_img # 원본 이미지 행렬 배열
+            result_orig_shape = result.orig_shape # 원본 이미지
+            result_names = result.names  # 클래스 인덱스(클래스 이름 딕셔너리)
+            ### 확률 데이터 정보 (result.probs)
+            result_probs = result.probs.data.cpu().numpy()
+
+            ### 가장 높은 확률의 클래스 정보
+            best_index = result_probs.argmax()
+            best_name = result_names[best_index]
+            best_prob = result_probs[best_index]
+            print(f"best_name: {best_name}, best_prob: {best_prob:.3f}")
+            self.get_logger().info(f'Predicted: {best_name} with probability {best_prob:.3f}')
+            
+            ### sooth action
+            linear_x_sum = 0
+            angular_z_sum = 0
+            for class_idx, key in result_names.items():
+                linear_x_sum += result_probs[class_idx] * keymap[key]['linear_x']
+                angular_z_sum += result_probs[class_idx] * keymap[key]['angular_z']
+            
+            linear_x_mean = linear_x_sum / len(result_names)
+            angular_z_mean = angular_z_sum / len(result_names)
+            self.get_logger().info(f'Smoothed Action - Linear: {linear_x_mean:.2f}, Angular: {angular_z_mean:.2f}')
+            
+            ### best action
+            linear_x_best = keymap[best_name]['linear_x']
+            angular_z_best = keymap[best_name]['angular_z']
+            self.get_logger().info(f'Best Action - Linear: {linear_x_best:.2f}, Angular: {angular_z_best:.2f}')
+            
+            ### publish
+            if publish_cmd_vel:
+                if action_smooth:
+                    self.publish_cmd_vel(
+                        linear_x=linear_x_mean,
+                        angular_z=angular_z_mean,
+                        save_data=False
+                    )
+                else:
+                    self.publish_cmd_vel(
+                        linear_x=linear_x_best,
+                        angular_z=angular_z_best,
+                        save_data=False
+                    )
+                self.get_logger().info('Published CMD_VEL based on prediction')
+        except Exception as e:
+            self.get_logger().error(f'Error during prediction: {str(e)}')
 
     def setup_terminal(self):
         """Setup terminal for raw input (no enter required)"""
@@ -174,7 +272,8 @@ class DataCollector(Node):
                         elif char == 's':
                             self.print_status()
                         elif char in keymap:
-                            self.handle_key_input(char)
+                            if self.mode == 'collect':
+                                self.handle_key_input(char)
                         elif char == '\x03':  # Ctrl+C
                             self.get_logger().info('Ctrl+C received')
                             self.running = False
@@ -224,12 +323,12 @@ class DataCollector(Node):
         """Handle keyboard input and execute corresponding action"""
         if key in keymap:
             action = keymap[key]
-            self.get_logger().info(f'Command: {key} - {action["message"]}')
+            self.get_logger().info(f'Command: {key}')
             
-            # Save data if image is available (save_data=True for all keys except '0')
-            save_data = (key != '0' and self.latest_image is not None)
+            # Save data if image is available (save_data=True for all keys)
+            save_data = (self.latest_image is not None)
             
-            if key != '0' and self.latest_image is None:
+            if not save_data:
                 self.get_logger().warn('No image available to save!')
             
             # Call publish_cmd_vel with the save_data flag
@@ -240,11 +339,11 @@ class DataCollector(Node):
                 key=key
             )
 
-    def publish_cmd_vel(self, linear_x=0.0, angular_z=0.0, save_data=False, key='0'):
+    def publish_cmd_vel(self, linear_x=0.0, angular_z=0.0, save_data=False, key=None):
         """Publish cmd_vel message and optionally save data"""
         
         # Save data first if requested
-        if save_data and self.latest_image is not None:
+        if save_data and key and self.latest_image is not None:
             self.save_data(key)
         
         # Then publish cmd_vel
@@ -255,10 +354,20 @@ class DataCollector(Node):
         
         self.get_logger().info(f'Published CMD_VEL - Linear: {linear_x:.2f}, Angular: {angular_z:.2f}')
 
+    def img_preprocess(self, image):
+        h, w = image.shape[:2]
+        crop_height = int(h * crop_top_ratio)
+        return image[crop_height:, :, :]
+    
     def save_data(self, key):
         """Save current image data to the appropriate directory"""
         if self.latest_image is None:
             self.get_logger().warn('No image data available to save')
+            return
+        
+        time_now = time.time()
+        if time_now - self.last_save_time < self.save_interval:
+            self.get_logger().info('Save interval not reached, skipping save')
             return
         
         try:
@@ -271,7 +380,8 @@ class DataCollector(Node):
             filepath = os.path.join(key_dir, filename)
             
             # Save image
-            success = cv2.imwrite(filepath, self.latest_image)
+            preprocessed_image = self.img_preprocess(self.latest_image)
+            success = cv2.imwrite(filepath, preprocessed_image)
             
             if success:
                 self.get_logger().info(f'✓ Saved image: {filepath}')
@@ -286,41 +396,6 @@ class DataCollector(Node):
         self.get_logger().info('Shutting down data collector...')
         self.running = False
         # Send stop command
-        self.publish_cmd_vel(0.0, 0.0, False, '0')
+        self.publish_cmd_vel(0.0, 0.0, False, None)
         # Restore terminal settings
         self.restore_terminal()
-
-def main(args=None):
-    rclpy.init(args=args)
-    data_collector = None
-    
-    try:
-        data_collector = DataCollector()
-        
-        from rclpy.executors import MultiThreadedExecutor
-        executor = MultiThreadedExecutor()
-        executor.add_node(data_collector)
-        
-        data_collector.get_logger().info('Starting data collection...')
-        data_collector.get_logger().info('Press keys directly for instant response!')
-        
-        # Spin until the running flag is False or KeyboardInterrupt
-        while data_collector.running and rclpy.ok():
-            executor.spin_once(timeout_sec=0.1)
-            
-    except KeyboardInterrupt:
-        if data_collector:
-            data_collector.get_logger().info('Data collection stopped by user (Ctrl+C)')
-    except Exception as e:
-        if data_collector:
-            data_collector.get_logger().error(f'Error in data collector: {str(e)}')
-        else:
-            print(f'Error initializing data collector: {str(e)}')
-    finally:
-        if data_collector:
-            data_collector.shutdown()
-            data_collector.destroy_node()
-        rclpy.shutdown()
-
-if __name__ == '__main__':
-    main()
