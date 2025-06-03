@@ -19,7 +19,7 @@ keymap = {
 
 ###### collect #######
 collect_dir = '/home/jetson/yolo_classification/dataset/collect'  # 데이터 수집 폴더
-collect_save_interval = 0.2 # seconds, 수집 주기
+save_interval = 0.2 # seconds, 수집 주기
 
 
 ###### predict #######
@@ -27,3 +27,4 @@ predict_model_path = '/home/jetson/yolo_classification/runs/classify/train/weigh
 action_smooth = False    # True: 평균으로 부드럽게 주행, False: Best action으로 주행
 prediction_interval = 0.1  # seconds
 forward_object_distance_threshold = 1
+

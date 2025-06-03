@@ -21,13 +21,21 @@ import numpy as np
 from limo_application.constants import (
     keymap, 
     collect_dir,
-    collect_save_interval,
+    save_interval,
     crop_top_ratio,
     predict_model_path,
     action_smooth,
     prediction_interval,
     forward_object_distance_threshold
 )
+
+###### meta key #######
+KEY_UP    = '\x1b[A'   # ↑
+KEY_DOWN  = '\x1b[B'   # ↓
+KEY_RIGHT = '\x1b[C'   # →
+KEY_LEFT  = '\x1b[D'   # ←
+KEY_SPACE = ' '        # 스페이스바(정지)
+KEY_ENTER = '\r'
 
 class Classifier(Node):
     def __init__(self, mode='collect'):
@@ -70,7 +78,8 @@ class Classifier(Node):
         self.latest_scan = None
         self.latest_image = None
         self.last_save_time = 0
-        self.save_interval = collect_save_interval  # Save interval in seconds
+        self.last_key = KEY_SPACE
+        self.save_interval = save_interval  # Save interval in seconds
         
         # Control variables
         self.running = True
@@ -95,14 +104,15 @@ class Classifier(Node):
         self.keyboard_thread = threading.Thread(target=self.keyboard_listener, daemon=True)
         self.keyboard_thread.start()
 
-        # self.get_logger().info('Data Collector initialized.')
-        # self.get_logger().info('Press a number key to control robot (NO ENTER needed).')
-        # self.get_logger().info('Press "q" to quit, "h" for help, "s" for status.')
+
 
         # mode setup
         self.output_dir = collect_dir
         if self.mode == 'collect':
             self.setup_output_directories()
+            self.get_logger().info('Data Collector initialized.')
+            self.get_logger().info('Press a number key to control robot (NO ENTER needed).')
+            self.get_logger().info('Press "q" to quit, "h" for help, "s" for status.')
         elif self.mode == 'predict':
             if not os.path.exists(predict_model_path):
                 raise FileNotFoundError(f'Predict model path does not exist: {predict_model_path}')
@@ -112,6 +122,9 @@ class Classifier(Node):
             # warmup model
             self.get_logger().info('Warming up model...')
             [self.model(np.zeros((128, 128, 3), dtype=np.uint8)) for _ in range(3)] 
+            self.get_logger().info('Predict initialized.')
+            self.get_logger().info('Press a number key to stop prediction robot.')
+            self.get_logger().info('Press "q" to quit, "h" for help, "s" for status.')
         else:
             raise ValueError(f'Invalid mode: {mode}. Use "collect" or "predict".')
 
@@ -122,8 +135,10 @@ class Classifier(Node):
 
     def predict_action(self):
         if self.get_forward_object_distance():
-            self.get_logger().info('Forward object detected, stopping prediction.')
+            self.get_logger().info('Forward object detected!!')
             return
+        elif self.last_key == KEY_SPACE:
+            self.get_logger().info('KEY_SPACE pressed!!')
 
         self.predict(publish_cmd_vel=True)
 
@@ -261,9 +276,18 @@ class Classifier(Node):
                 # Check if input is available using select
                 if select.select([sys.stdin], [], [], 0.1)[0]:
                     char = sys.stdin.read(1).lower()
-                    
+                    self.last_key = char
                     if char:
-                        if char == 'q':
+                        if char == '\x03':  # Ctrl+C
+                            self.get_logger().info('Ctrl+C received')
+                            self.running = False
+                            break
+                        elif char in keymap:
+                            if self.mode == 'collect':
+                                self.handle_key_input(char)
+                        elif char in [KEY_UP, KEY_DOWN, KEY_RIGHT, KEY_LEFT]: # ↑, ↓, →, ←
+                            self.handle_key_input(char)
+                        elif char == 'q':
                             self.get_logger().info('Quit command received')
                             self.running = False
                             break
@@ -271,13 +295,6 @@ class Classifier(Node):
                             self.print_help()
                         elif char == 's':
                             self.print_status()
-                        elif char in keymap:
-                            if self.mode == 'collect':
-                                self.handle_key_input(char)
-                        elif char == '\x03':  # Ctrl+C
-                            self.get_logger().info('Ctrl+C received')
-                            self.running = False
-                            break
                         else:
                             # Only show message for printable characters
                             if char.isprintable() and char != ' ':
@@ -338,6 +355,17 @@ class Classifier(Node):
                 save_data=save_data,
                 key=key
             )
+        elif key == KEY_UP: # ↑
+            self.publish_cmd_vel(linear_x=0.5, angular_z=0.0)
+        elif key == KEY_DOWN: # ↓
+            self.publish_cmd_vel(linear_x=0.5, angular_z=0.0)
+        elif key == KEY_RIGHT: # →
+            self.publish_cmd_vel(linear_x=0.5, angular_z=0.0)
+        elif key == KEY_LEFT: # ←
+            self.publish_cmd_vel(linear_x=0.5, angular_z=0.0)
+        elif key == KEY_SPACE: # spacebar
+            self.publish_cmd_vel(linear_x=0.0, angular_z=0.0)
+
 
     def publish_cmd_vel(self, linear_x=0.0, angular_z=0.0, save_data=False, key=None):
         """Publish cmd_vel message and optionally save data"""
