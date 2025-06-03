@@ -286,11 +286,9 @@ class Classifier(Node):
                             self.get_logger().info('Ctrl+C received')
                             self.running = False
                             break
-                        elif char in keymap:
+                        elif (char in keymap) or (char.lower() in keymap):
                             if self.mode == 'collect':
-                                self.handle_key_input(char)
-                        elif char in [KEY_UP, KEY_DOWN, KEY_RIGHT, KEY_LEFT]: # ↑, ↓, →, ←
-                            self.handle_key_input(char)
+                                self.handle_key_input(char)            
                         elif char == 'q':
                             self.get_logger().info('Quit command received')
                             self.running = False
@@ -359,16 +357,13 @@ class Classifier(Node):
                 save_data=save_data,
                 key=key
             )
-        elif key == KEY_UP: # ↑
-            self.publish_cmd_vel(linear_x=0.5, angular_z=0.0)
-        elif key == KEY_DOWN: # ↓
-            self.publish_cmd_vel(linear_x=0.5, angular_z=0.0)
-        elif key == KEY_RIGHT: # →
-            self.publish_cmd_vel(linear_x=0.5, angular_z=0.0)
-        elif key == KEY_LEFT: # ←
-            self.publish_cmd_vel(linear_x=0.5, angular_z=0.0)
-        elif key == KEY_SPACE: # spacebar
-            self.publish_cmd_vel(linear_x=0.0, angular_z=0.0)
+        elif key.lower() in keymap:
+            action = keymap[key]
+            self.get_logger().info(f'Command: {key}')
+            self.publish_cmd_vel(
+                linear_x=action['linear_x'],
+                angular_z=action['angular_z']
+            )  
 
 
     def publish_cmd_vel(self, linear_x=0.0, angular_z=0.0, save_data=False, key=None):
