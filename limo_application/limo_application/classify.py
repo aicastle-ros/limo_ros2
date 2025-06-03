@@ -136,9 +136,12 @@ class Classifier(Node):
     def predict_action(self):
         if self.get_forward_object_distance():
             self.get_logger().info('Forward object detected!!')
+            self.publish_cmd_vel(0,0)
             return
         elif self.last_key == KEY_SPACE:
             self.get_logger().info('KEY_SPACE pressed!!')
+            self.publish_cmd_vel(0,0)
+            return
 
         self.predict(publish_cmd_vel=True)
 
@@ -147,13 +150,14 @@ class Classifier(Node):
             latest_scan_len = len(self.latest_scan)
             last_scan_section_len = latest_scan_len // 3
             right_list = self.latest_scan[:last_scan_section_len]
-            right_mean = np.mean(right_list) if right_list else 0.0
+            # right_mean = np.mean(right_list) if right_list else 0.0
             forward_list = self.latest_scan[last_scan_section_len:2*last_scan_section_len]
-            forward_mean = np.mean(forward_list) if forward_list else 0.0
+            # forward_mean = np.mean(forward_list) if forward_list else 0.0
+            smallest = sorted(x for x in forward_list if x != 0)[0]
             left_list = self.latest_scan[2*last_scan_section_len:]
-            left_mean = np.mean(left_list) if left_list else 0.0
-            if forward_mean < forward_object_distance_threshold:
-                self.get_logger().info(f'Forward object detected: {forward_mean:.2f} m')
+            # left_mean = np.mean(left_list) if left_list else 0.0
+            if smallest < forward_object_distance_threshold:
+                self.get_logger().info(f'Forward object detected: {smallest:.2f} m')
                 return True
         return False
 
@@ -275,7 +279,7 @@ class Classifier(Node):
             try:
                 # Check if input is available using select
                 if select.select([sys.stdin], [], [], 0.1)[0]:
-                    char = sys.stdin.read(1).lower()
+                    char = sys.stdin.read(1)
                     self.last_key = char
                     if char:
                         if char == '\x03':  # Ctrl+C
