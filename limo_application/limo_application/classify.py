@@ -17,7 +17,6 @@ import tty
 import select
 import time
 import numpy as np
-import keyboard
 import requests
 
 from limo_application.constants import (
