@@ -21,6 +21,7 @@ import requests
 
 from limo_application.constants import (
     crop_top_ratio,
+    save_interval,
     keymap, 
     collect_dir,
     prediction_interval,
@@ -68,6 +69,7 @@ class Classifier(Node):
         self.latest_scan = None
         self.latest_image = None
         self.last_key = None
+        self.last_save_time = 0
         
         # Control variables
         self.running = True
@@ -309,6 +311,12 @@ class Classifier(Node):
             self.get_logger().warn('No image data available to save\r')
             return
         
+        time_now = time.time()
+        if time_now - self.last_save_time < save_interval:
+            return
+        else:
+            self.last_save_time = time_now
+
         try:
             # Create timestamp with milliseconds
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]

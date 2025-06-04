@@ -1,6 +1,9 @@
 # 주변 환경에 덜 민감하게 (자율주행 도로에만 집중하게) 이미지 위쪽을 자르는 비율
 crop_top_ratio = 0.5  # 0.0 ~ 1.0
 
+# 사진 저장 간격 (sec)
+save_interval = 0.3
+
 # 키보드 입력값과 대응되는 action 맵
 keymap = {
     'u': { # left
