@@ -17,25 +17,16 @@ import tty
 import select
 import time
 import numpy as np
+import keyboard
+import requests
 
 from limo_application.constants import (
+    crop_top_ratio,
     keymap, 
     collect_dir,
-    save_interval,
-    crop_top_ratio,
-    predict_model_path,
-    action_smooth,
     prediction_interval,
-    forward_object_distance_threshold
+    forward_object_distance_threshold,
 )
-
-###### meta key #######
-KEY_UP    = '\x1b[A'   # ↑
-KEY_DOWN  = '\x1b[B'   # ↓
-KEY_RIGHT = '\x1b[C'   # →
-KEY_LEFT  = '\x1b[D'   # ←
-KEY_SPACE = ' '        # 스페이스바(정지)
-KEY_ENTER = '\r'
 
 class Classifier(Node):
     def __init__(self, mode='collect'):
@@ -77,9 +68,7 @@ class Classifier(Node):
         # latest data
         self.latest_scan = None
         self.latest_image = None
-        self.last_save_time = 0
-        self.last_key = KEY_SPACE
-        self.save_interval = save_interval  # Save interval in seconds
+        self.last_key = None
         
         # Control variables
         self.running = True
@@ -88,18 +77,6 @@ class Classifier(Node):
         self.old_settings = None
         self.setup_terminal()
         
-        
-        # Check if keymap is empty
-        if 'h' in keymap:
-            self.get_logger().info("'h' key is reserved for help, It will be ignored in keymap.")
-            del keymap['h']
-        if 's' in keymap:
-            self.get_logger().info("'s' key is reserved for status, It will be ignored in keymap.")
-            del keymap['s']
-        if 'q' in keymap:
-            self.get_logger().info("'q' key is reserved for quit, It will be ignored in keymap.")
-            del keymap['q']
-
         # Keyboard input thread
         self.keyboard_thread = threading.Thread(target=self.keyboard_listener, daemon=True)
         self.keyboard_thread.start()
@@ -110,118 +87,86 @@ class Classifier(Node):
         self.output_dir = collect_dir
         if self.mode == 'collect':
             self.setup_output_directories()
-            self.get_logger().info('Data Collector initialized.')
-            self.get_logger().info('Press a number key to control robot (NO ENTER needed).')
-            self.get_logger().info('Press "q" to quit, "h" for help, "s" for status.')
+            self.get_logger().info('Data Collector initialized.\r')
         elif self.mode == 'predict':
-            if not os.path.exists(predict_model_path):
-                raise FileNotFoundError(f'Predict model path does not exist: {predict_model_path}')
-            # load model
-            from ultralytics import YOLO
-            self.model = YOLO(predict_model_path)
-            # warmup model
-            self.get_logger().info('Warming up model...')
-            [self.model(np.zeros((128, 128, 3), dtype=np.uint8)) for _ in range(3)] 
-            self.get_logger().info('Predict initialized.')
-            self.get_logger().info('Press a number key to stop prediction robot.')
-            self.get_logger().info('Press "q" to quit, "h" for help, "s" for status.')
+            self.predict_start = False
+            self.predict_timer = self.create_timer(prediction_interval, self.predict_action)
+            self.get_logger().info('Predict initialized.\r')
+            self.get_logger().info('Press SPACE to start/stop prediction.\r')
         else:
             raise ValueError(f'Invalid mode: {mode}. Use "collect" or "predict".')
 
-        # Timer for periodic prediction
-        if self.mode == 'predict':
-            self.predict_timer = self.create_timer(prediction_interval, self.predict_action)
 
 
     def predict_action(self):
+        if not self.predict_start:
+            return
+        
         if self.get_forward_object_distance():
-            self.get_logger().info('Forward object detected!!')
             self.publish_cmd_vel(0,0)
             return
-        elif self.last_key == KEY_SPACE:
-            self.get_logger().info('KEY_SPACE pressed!!')
-            self.publish_cmd_vel(0,0)
-            return
-
-        self.predict(publish_cmd_vel=True)
-
+                         
+        predict_result = self.predict()
+        if predict_result:
+            self.publish_cmd_vel(
+                linear_x=predict_result['linear_x'],
+                angular_z=predict_result['angular_z'],
+                save_data=False
+            )
+                
     def get_forward_object_distance(self):
-        if self.latest_scan :
-            latest_scan_len = len(self.latest_scan)
-            last_scan_section_len = latest_scan_len // 3
-            right_list = self.latest_scan[:last_scan_section_len]
-            # right_mean = np.mean(right_list) if right_list else 0.0
-            forward_list = self.latest_scan[last_scan_section_len:2*last_scan_section_len]
-            # forward_mean = np.mean(forward_list) if forward_list else 0.0
-            smallest = sorted(x for x in forward_list if x != 0)[0]
-            left_list = self.latest_scan[2*last_scan_section_len:]
-            # left_mean = np.mean(left_list) if left_list else 0.0
-            if smallest < forward_object_distance_threshold:
-                self.get_logger().info(f'Forward object detected: {smallest:.2f} m')
-                return True
+        try:
+            if self.latest_scan :
+                latest_scan_len = len(self.latest_scan)
+                last_scan_section_len = latest_scan_len // 3
+                # right_list = self.latest_scan[:last_scan_section_len]
+                # left_list = self.latest_scan[2*last_scan_section_len:]
+                forward_list = self.latest_scan[last_scan_section_len:2*last_scan_section_len]
+                forward_list_no_zeros = sorted([x for x in forward_list if x > 0])
+                if len(forward_list_no_zeros) == 0:
+                    return True
+                elif np.mean(forward_list_no_zeros[:10]) < forward_object_distance_threshold:
+                    self.get_logger().info(f'Forward object detected: {np.mean(forward_list_no_zeros[:10]):.2f} m\r')
+                    return True
+                else:
+                    return False
+        except Exception as e:
+            self.get_logger().error(f'Error getting forward object distance: {str(e)}\r')
+            
         return False
 
-    def predict(self, publish_cmd_vel=False):
+    def predict(self):
         """Run prediction on the latest image"""
         if self.latest_image is None:
-            self.get_logger().warn('No image available for prediction')
+            self.get_logger().warn('No image available for prediction\r')
             return
         
         try:
-            results = self.model(
-                source=self.img_preprocess(self.latest_image),  # Preprocess image
-                # verbose=False,  # 자세한 출력 제거
-                # augment=False,  # 분류 모델에서 불필요한 출력 제거
-                # imgsz=160
-            )
-            result = results[0]
-            ### 공통 데이터 정보 (result)
-            result_orig_img = result.orig_img # 원본 이미지 행렬 배열
-            result_orig_shape = result.orig_shape # 원본 이미지
-            result_names = result.names  # 클래스 인덱스(클래스 이름 딕셔너리)
-            ### 확률 데이터 정보 (result.probs)
-            result_probs = result.probs.data.cpu().numpy()
-
-            ### 가장 높은 확률의 클래스 정보
-            best_index = result_probs.argmax()
-            best_name = result_names[best_index]
-            best_prob = result_probs[best_index]
-            print(f"best_name: {best_name}, best_prob: {best_prob:.3f}")
-            self.get_logger().info(f'Predicted: {best_name} with probability {best_prob:.3f}')
+            preprocessed_image = self.img_preprocess(self.latest_image)
+            rgb_image = cv2.cvtColor(self.latest_image, cv2.COLOR_BGR2RGB)
+            _, encoded_image = cv2.imencode('.jpg', rgb_image)
+            files = {"file": ("image.jpg", encoded_image.tobytes(), "image/jpeg")}
+            response = requests.post("http://127.0.0.1:5000", files=files)
+            if response.status_code != 200:
+                self.get_logger().error(f'Error in prediction request: {response.status_code} - {response.text}\r')
+                return
+            result = response.json()
+            label = result['label']
+            prob = result['prob']
+            linear_x = keymap[label]['linear_x']
+            angular_z = keymap[label]['angular_z']
+            self.get_logger().info(f'------ Prediction Result ------\r')
+            self.get_logger().info(f'Best Action - label:{label}, prob:{prob:.2f}, linear_x: {linear_x:.2f}, angular_z: {angular_z:.2f}\r')
+            self.get_logger().info(f'-------------------------------\r')
+            return {
+                'label': label,
+                'prob': prob,
+                'linear_x': linear_x,
+                'angular_z': angular_z,
+            }
             
-            ### sooth action
-            linear_x_sum = 0
-            angular_z_sum = 0
-            for class_idx, key in result_names.items():
-                linear_x_sum += result_probs[class_idx] * keymap[key]['linear_x']
-                angular_z_sum += result_probs[class_idx] * keymap[key]['angular_z']
-            
-            linear_x_mean = linear_x_sum / len(result_names)
-            angular_z_mean = angular_z_sum / len(result_names)
-            self.get_logger().info(f'Smoothed Action - Linear: {linear_x_mean:.2f}, Angular: {angular_z_mean:.2f}')
-            
-            ### best action
-            linear_x_best = keymap[best_name]['linear_x']
-            angular_z_best = keymap[best_name]['angular_z']
-            self.get_logger().info(f'Best Action - Linear: {linear_x_best:.2f}, Angular: {angular_z_best:.2f}')
-            
-            ### publish
-            if publish_cmd_vel:
-                if action_smooth:
-                    self.publish_cmd_vel(
-                        linear_x=linear_x_mean,
-                        angular_z=angular_z_mean,
-                        save_data=False
-                    )
-                else:
-                    self.publish_cmd_vel(
-                        linear_x=linear_x_best,
-                        angular_z=angular_z_best,
-                        save_data=False
-                    )
-                self.get_logger().info('Published CMD_VEL based on prediction')
         except Exception as e:
-            self.get_logger().error(f'Error during prediction: {str(e)}')
+            self.get_logger().error(f'Error during prediction: {str(e)}\r')
 
     def setup_terminal(self):
         """Setup terminal for raw input (no enter required)"""
@@ -229,7 +174,7 @@ class Classifier(Node):
             self.old_settings = termios.tcgetattr(sys.stdin)
             tty.setraw(sys.stdin.fileno())
         except Exception as e:
-            self.get_logger().error(f'Error setting up terminal: {str(e)}')
+            self.get_logger().error(f'Error setting up terminal: {str(e)}\r')
             self.old_settings = None
 
     def restore_terminal(self):
@@ -238,22 +183,22 @@ class Classifier(Node):
             try:
                 termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_settings)
             except Exception as e:
-                self.get_logger().error(f'Error restoring terminal: {str(e)}')
+                self.get_logger().error(f'Error restoring terminal: {str(e)}\r')
 
     def setup_output_directories(self):
         """Create output directories for each keymap entry"""
         try:
             if not os.path.exists(self.output_dir):
                 os.makedirs(self.output_dir)
-                self.get_logger().info(f'Created main output directory: {self.output_dir}')
+                self.get_logger().info(f'Created main output directory: {self.output_dir}\r')
             
             for key in keymap.keys():
                 key_dir = os.path.join(self.output_dir, key)
                 if not os.path.exists(key_dir):
                     os.makedirs(key_dir)
-                    self.get_logger().info(f'Created directory: {key_dir}')
+                    self.get_logger().info(f'Created directory: {key_dir}\r')
         except Exception as e:
-            self.get_logger().error(f'Error creating directories: {str(e)}')
+            self.get_logger().error(f'Error creating directories: {str(e)}\r')
 
     def cmd_vel_callback(self, msg: Twist):
         """Callback for cmd_vel messages"""
@@ -269,86 +214,66 @@ class Classifier(Node):
             cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             self.latest_image = cv_image
         except Exception as e:
-            self.get_logger().error(f'Error processing image: {str(e)}')
+            self.get_logger().error(f'Error processing image: {str(e)}\r')
+
 
     def keyboard_listener(self):
         """Listen for keyboard input in a separate thread - instant response"""
-        self.get_logger().info('Keyboard listener started. Press keys directly (no Enter needed)...')
+        self.get_logger().info('Keyboard listener started. Press keys directly (no Enter needed)...\r')
         
+        time_last = 0
         while self.running and rclpy.ok():
+            time_now = time.time()
             try:
                 # Check if input is available using select
                 if select.select([sys.stdin], [], [], 0.1)[0]:
-                    char = sys.stdin.read(1)
-                    self.last_key = char
-                    if char:
-                        if char == '\x03':  # Ctrl+C
-                            self.get_logger().info('Ctrl+C received')
-                            self.running = False
-                            break
-                        elif (char in keymap) or (char.lower() in keymap):
-                            if self.mode == 'collect':
-                                self.handle_key_input(char)            
-                        elif char == 'q':
-                            self.get_logger().info('Quit command received')
-                            self.running = False
-                            break
-                        elif char == 'h':
-                            self.print_help()
-                        elif char == 's':
-                            self.print_status()
+                    if char:= sys.stdin.read(1):
+                        if (char != self.last_key) or ((time_now - time_last) > 0.1):
+                            time_last = time_now
+                            self.last_key = char
+                            self.get_logger().info(f'Key pressed: "{char}"\r')
                         else:
-                            # Only show message for printable characters
-                            if char.isprintable() and char != ' ':
-                                self.get_logger().info(f'Unknown command: "{char}". Press "h" for help.')
+                            continue
+                        
+                        if char == '\x03':  # Ctrl+C
+                            self.get_logger().info('Ctrl+C received\r')
+                            self.running = False
+                            break
+                        
+                        if self.mode == 'predict':
+                            if char == ' ': # spacebar
+                                self.predict_start = not self.predict_start
+                                if self.predict_start:
+                                    self.get_logger().info('Prediction started\r')
+                                else:
+                                    self.get_logger().info('Prediction stopped\r')
+                        
+                        if self.mode == 'collect':
+                            if char in keymap :
+                                self.handle_key_input(char)
                         
             except KeyboardInterrupt:
-                self.get_logger().info('KeyboardInterrupt received')
+                self.get_logger().info('KeyboardInterrupt received\r')
                 self.running = False
                 break
             except Exception as e:
-                self.get_logger().error(f'Error in keyboard listener: {str(e)}')
-                break
+                self.get_logger().error(f'Error in keyboard listener: {str(e)}\r')
+                continue
         
-        self.get_logger().info('Keyboard listener stopped')
+        self.get_logger().info('Keyboard listener stopped\r')
 
-    def print_help(self):
-        """Print help message"""
-        self.get_logger().info('=== HELP ===')
-        self.get_logger().info('  s: Show status')
-        self.get_logger().info('  h: Show this help')
-        self.get_logger().info('  q: Quit program')
-        self.get_logger().info('============')
-
-    def print_status(self):
-        """Print current status"""
-        self.get_logger().info('=== STATUS ===')
-        self.get_logger().info(f'Output directory: {self.output_dir}')
-        self.get_logger().info(f'Latest scan available: {self.latest_scan is not None}')
-        self.get_logger().info(f'Latest image available: {self.latest_image is not None}')
-        if self.latest_image is not None:
-            h, w = self.latest_image.shape[:2]
-            self.get_logger().info(f'Image size: {w}x{h}')
-        
-        # Count saved images in each directory
-        for key in keymap.keys():
-            key_dir = os.path.join(self.output_dir, key)
-            if os.path.exists(key_dir):
-                count = len([f for f in os.listdir(key_dir) if f.endswith('.jpg')])
-                self.get_logger().info(f'Images in {key}/ directory: {count}')
-        self.get_logger().info('==============')
 
     def handle_key_input(self, key):
         """Handle keyboard input and execute corresponding action"""
         if key in keymap:
             action = keymap[key]
-            self.get_logger().info(f'Command: {key}')
+            self.get_logger().info(f'Command: {key}\r')
             
             # Save data if image is available (save_data=True for all keys)
             save_data = (self.latest_image is not None)
             
             if not save_data:
-                self.get_logger().warn('No image available to save!')
+                self.get_logger().warn('No image available to save!\r')
             
             # Call publish_cmd_vel with the save_data flag
             self.publish_cmd_vel(
@@ -357,13 +282,6 @@ class Classifier(Node):
                 save_data=save_data,
                 key=key
             )
-        elif key.lower() in keymap:
-            action = keymap[key]
-            self.get_logger().info(f'Command: {key}')
-            self.publish_cmd_vel(
-                linear_x=action['linear_x'],
-                angular_z=action['angular_z']
-            )  
 
 
     def publish_cmd_vel(self, linear_x=0.0, angular_z=0.0, save_data=False, key=None):
@@ -375,11 +293,11 @@ class Classifier(Node):
         
         # Then publish cmd_vel
         cmd_vel_msg = Twist()
-        cmd_vel_msg.linear.x = linear_x
-        cmd_vel_msg.angular.z = angular_z
+        cmd_vel_msg.linear.x = float(linear_x)
+        cmd_vel_msg.angular.z = float(angular_z)
         self.cmd_vel_pub.publish(cmd_vel_msg)
         
-        self.get_logger().info(f'Published CMD_VEL - Linear: {linear_x:.2f}, Angular: {angular_z:.2f}')
+        self.get_logger().info(f'Published CMD_VEL - Linear: {linear_x:.2f}, Angular: {angular_z:.2f}\r')
 
     def img_preprocess(self, image):
         h, w = image.shape[:2]
@@ -389,12 +307,7 @@ class Classifier(Node):
     def save_data(self, key):
         """Save current image data to the appropriate directory"""
         if self.latest_image is None:
-            self.get_logger().warn('No image data available to save')
-            return
-        
-        time_now = time.time()
-        if time_now - self.last_save_time < self.save_interval:
-            self.get_logger().info('Save interval not reached, skipping save')
+            self.get_logger().warn('No image data available to save\r')
             return
         
         try:
@@ -411,16 +324,16 @@ class Classifier(Node):
             success = cv2.imwrite(filepath, preprocessed_image)
             
             if success:
-                self.get_logger().info(f'✓ Saved image: {filepath}')
+                self.get_logger().info(f'✓ Saved image: {filepath}\r')
             else:
-                self.get_logger().error(f'✗ Failed to save image: {filepath}')
+                self.get_logger().error(f'✗ Failed to save image: {filepath}\r')
                 
         except Exception as e:
-            self.get_logger().error(f'Error saving data: {str(e)}')
+            self.get_logger().error(f'Error saving data: {str(e)}\r')
 
     def shutdown(self):
         """Clean shutdown"""
-        self.get_logger().info('Shutting down data collector...')
+        self.get_logger().info('Shutting down data collector...\r')
         self.running = False
         # Send stop command
         self.publish_cmd_vel(0.0, 0.0, False, None)

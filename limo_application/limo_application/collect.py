@@ -14,21 +14,18 @@ def main(args=None):
         executor = MultiThreadedExecutor()
         executor.add_node(classifier)
         
-        classifier.get_logger().info('Starting data collection...')
-        classifier.get_logger().info('Press keys directly for instant response!')
-        
         # Spin until the running flag is False or KeyboardInterrupt
         while classifier.running and rclpy.ok():
             executor.spin_once(timeout_sec=0.1)
             
     except KeyboardInterrupt:
         if classifier:
-            classifier.get_logger().info('Data collection stopped by user (Ctrl+C)')
+            classifier.get_logger().info('Data collection stopped by user (Ctrl+C)\r')
     except Exception as e:
         if classifier:
-            classifier.get_logger().error(f'Error in data collector: {str(e)}')
+            classifier.get_logger().error(f'Error in data collector: {str(e)}\r')
         else:
-            print(f'Error initializing data collector: {str(e)}')
+            print(f'Error initializing data collector: {str(e)}\r')
     finally:
         if classifier:
             classifier.shutdown()
