@@ -2,7 +2,7 @@
 crop_top_ratio = 0.5  # 0.0 ~ 1.0
 
 # 사진 저장 간격 (sec)
-save_interval = 0.3
+save_interval = 0.1
 
 # 키보드 입력값과 대응되는 action 맵
 keymap = {
@@ -29,4 +29,7 @@ prediction_interval = 0.1
 
 # predict 할때 앞쪽 물체가 너무 가까이 있는 경우 중단을 위한 거리 (meters)
 forward_object_distance_threshold = 0.4
+
+# 확률 분포를 통해해
+smooth_action = False
 

@@ -26,6 +26,7 @@ from limo_application.constants import (
     collect_dir,
     prediction_interval,
     forward_object_distance_threshold,
+    smooth_action,
 )
 
 class Classifier(Node):
@@ -109,9 +110,15 @@ class Classifier(Node):
                          
         predict_result = self.predict()
         if predict_result:
+            if smooth_action:
+                linear_x = predict_result['mean_linear_x']
+                angular_z = predict_result['mean_angular_z']
+            else:
+                linear_x = predict_result['best_linear_x']
+                angular_z = predict_result['best_angular_z']
             self.publish_cmd_vel(
-                linear_x=predict_result['linear_x'],
-                angular_z=predict_result['angular_z'],
+                linear_x=linear_x,
+                angular_z=angular_z,
                 save_data=False
             )
                 
@@ -151,19 +158,26 @@ class Classifier(Node):
             if response.status_code != 200:
                 self.get_logger().error(f'Error in prediction request: {response.status_code} - {response.text}\r')
                 return
-            result = response.json()
-            label = result['label']
-            prob = result['prob']
-            linear_x = keymap[label]['linear_x']
-            angular_z = keymap[label]['angular_z']
             self.get_logger().info(f'------ Prediction Result ------\r')
-            self.get_logger().info(f'Best Action - label:{label}, prob:{prob:.2f}, linear_x: {linear_x:.2f}, angular_z: {angular_z:.2f}\r')
+            result = response.json()
+            self.get_logger().info(f'result_names - {result["result_names"]}\r')
+            self.get_logger().info(f'result_probs - {[f"{p:.2f}" for p in result["result_probs"]]}\r')
+            self.get_logger().info(f'best_index - {result["best_index"]}\r')
+            self.get_logger().info(f'best_name - {result["best_name"]}\r')
+            self.get_logger().info(f'best_prob - {result["best_prob"]:.2f}\r')
+
+            best_linear_x = keymap[result['best_name']]['linear_x']
+            best_angular_z = keymap[result['best_name']]['angular_z']
+            mean_linear_x = sum(p * keymap[name]['linear_x'] for name, p in zip(result['result_names'], result['result_probs']))
+            mean_angular_z = sum(p * keymap[name]['angular_z'] for name, p in zip(result['result_names'], result['result_probs']))
+            
             self.get_logger().info(f'-------------------------------\r')
             return {
-                'label': label,
-                'prob': prob,
-                'linear_x': linear_x,
-                'angular_z': angular_z,
+                'result': result,
+                'best_linear_x': best_linear_x,
+                'best_angular_z': best_angular_z,
+                'mean_linear_x': mean_linear_x,
+                'mean_angular_z': mean_angular_z
             }
             
         except Exception as e:
